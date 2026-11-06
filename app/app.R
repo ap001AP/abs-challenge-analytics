@@ -12,6 +12,8 @@ library(plotly)
 grades    <- readRDS("app_data/grades.rds")
 decisions <- readRDS("app_data/decisions.rds")
 params    <- readRDS("app_data/params.rds")
+sigma_groups <- readRDS("app_data/sigma_groups.rds")
+read_curves  <- readRDS("app_data/read_curves.rds")
 
 # ---- Design tokens: "neon scoreboard" dark theme ----------------------------
 # Data colours (teal / pink / purple) were run through a colour-blind
@@ -156,6 +158,63 @@ call_badge <- function(label, call, emphasis = FALSE) {
   )
 }
 
+# ---- Who Sees the Zone helpers ------------------------------------------------
+# Three groups, three validated slots (teal / purple / pink), each also with
+# its own marker shape in the chart and its name on every card.
+GROUP_STYLE <- list(
+  "Catchers, catching" = list(col = COL$won,    symbol = "circle",  short = "Catchers behind the plate"),
+  "Catchers, batting"  = list(col = COL$missed, symbol = "diamond", short = "The same catchers at the plate"),
+  "Other batters"      = list(col = COL$lost,   symbol = "square",  short = "Everyone else at the plate")
+)
+
+sig <- function(g) sigma_groups$sigma_in[sigma_groups$group == g]
+
+# A 17 x 24 in strike zone with a blurred band of +/- sigma around the edge:
+# the region where this group can't tell ball from strike.
+sigma_zone_svg <- function(sigma, col, id) {
+  w <- 17; h <- 24; pad <- 8.5; r <- 1.45
+  HTML(paste0(
+    sprintf('<svg viewBox="%g %g %g %g" width="100%%" style="max-width:240px" role="img" aria-label="Strike zone with a fuzzy band of plus or minus %.1f inches">',
+            -pad, -pad, w + 2 * pad, h + 2 * pad, sigma),
+    sprintf('<defs><filter id="%s" x="-50%%" y="-50%%" width="200%%" height="200%%"><feGaussianBlur stdDeviation="%g"/></filter></defs>',
+            id, sigma / 2),
+    # outer glow, then punch out the confident middle
+    sprintf('<rect x="%g" y="%g" width="%g" height="%g" fill="%s" opacity="0.55" filter="url(#%s)"/>',
+            -sigma, -sigma, w + 2 * sigma, h + 2 * sigma, col, id),
+    sprintf('<rect x="%g" y="%g" width="%g" height="%g" fill="%s" filter="url(#%s)"/>',
+            sigma, sigma, max(w - 2 * sigma, 0.1), max(h - 2 * sigma, 0.1), COL$card, id),
+    # crisp +/- sigma guides
+    sprintf('<rect x="%g" y="%g" width="%g" height="%g" fill="none" stroke="%s" stroke-width="0.2" stroke-dasharray="0.8 0.8"/>',
+            -sigma, -sigma, w + 2 * sigma, h + 2 * sigma, col),
+    sprintf('<rect x="%g" y="%g" width="%g" height="%g" fill="none" stroke="%s" stroke-width="0.2" stroke-dasharray="0.8 0.8"/>',
+            sigma, sigma, max(w - 2 * sigma, 0.1), max(h - 2 * sigma, 0.1), col),
+    # the zone itself + a baseball to scale, touching the edge
+    sprintf('<rect x="0" y="0" width="%g" height="%g" fill="none" stroke="%s" stroke-width="0.35"/>',
+            w, h, COL$text1),
+    sprintf('<circle cx="%g" cy="%g" r="%g" fill="none" stroke="%s" stroke-width="0.3"/>',
+            w + r, h / 2, r, COL$text1),
+    '</svg>'
+  ))
+}
+
+sigma_card <- function(g) {
+  row <- sigma_groups[sigma_groups$group == g, ]
+  st  <- GROUP_STYLE[[g]]
+  card(
+    card_header(span(style = sprintf("color:%s;", st$col), "■ "), st$short),
+    div(class = "text-center",
+        sigma_zone_svg(row$sigma_in, st$col, paste0("blur", match(g, names(GROUP_STYLE)))),
+        div(class = "stat-value mt-2", style = "font-size:2.2rem;",
+            sprintf("±%.1f in", row$sigma_in)),
+        div(class = "small text-secondary",
+            sprintf("typical read error · 95%% CI %.1f–%.1f", row$sigma_lo, row$sigma_hi)),
+        div(class = "small text-secondary",
+            sprintf("%s players · %s challenges · %s opportunities",
+                    row$n_players, format(row$n_chal, big.mark = ","),
+                    format(row$n_opps, big.mark = ","))))
+  )
+}
+
 coming_soon <- function(title, text) {
   card(card_header(title), p(class = "text-secondary", text))
 }
@@ -175,8 +234,38 @@ ui <- page_navbar(
   nav_panel("Headline",
             coming_soon("Coming next", "Players let 3 of 4 winnable challenges go.")),
   
-  nav_panel("Who Sees the Zone",
-            coming_soon("Coming next", "Catchers read the zone to ~2 inches; batters ~3.5.")),
+  nav_panel(
+    "Who Sees the Zone",
+    div(class = "py-3",
+        h3(class = "mb-1", "Who sees the zone best?"),
+        p(class = "text-secondary mb-3",
+          "How far off can a pitch be before a player can tell? Estimated from 345k",
+          " challenge decisions: how sharply each group's willingness to challenge",
+          " rises as a missed call gets more obvious. The glowing band is where they",
+          " can't tell ball from strike. ○ = a baseball, to scale."),
+        layout_columns(
+          col_widths = c(4, 4, 4),
+          sigma_card("Catchers, catching"),
+          sigma_card("Catchers, batting"),
+          sigma_card("Other batters")
+        ),
+        layout_columns(
+          col_widths = c(7, 5),
+          card(
+            card_header("The evidence: how often each group challenges"),
+            plotlyOutput("read_curve", height = "420px"),
+            p(class = "small text-secondary mb-0",
+              "Every called pitch that went against a player who still had a challenge.",
+              " Left of the line the umpire was right; right of it he missed. A sharper",
+              " jump at the line means a sharper read.")
+          ),
+          card(
+            card_header("So is it the player, or the view?"),
+            uiOutput("zone_story")
+          )
+        )
+    )
+  ),
   
   nav_panel(
     "Brave · Reckless · Chicken · Lost",
@@ -434,6 +523,102 @@ server <- function(input, output, session) {
         margin = list(t = 5, b = 5, l = 5, r = 5)
       ) |>
       config(displayModeBar = FALSE)
+  })
+  
+  # -- Who Sees the Zone -------------------------------------------------------
+  output$read_curve <- renderPlotly({
+    p <- plot_ly()
+    for (g in names(GROUP_STYLE)) {
+      st <- GROUP_STYLE[[g]]
+      # Build hover text NOW: plotly evaluates ~formulas lazily, so a formula
+      # referencing the loop variable `st` would see only its LAST value.
+      d <- filter(read_curves, group == g) |>
+        mutate(hover = sprintf(
+          "<b>%s</b><br>%s<br>%.0f%% challenged (n = %s)",
+          st$short,
+          if_else(bin < 0, sprintf("Ump right by %.1f in", -bin),
+                  if_else(bin > 0, sprintf("Ump wrong by %.1f in", bin),
+                          "Right on the edge")),
+          100 * challenge_rate, formatC(n, format = "d", big.mark = ",")  # no padding
+        ))
+      p <- p |> add_trace(
+        data = d, x = ~bin, y = ~challenge_rate, type = "scatter", mode = "lines+markers",
+        name = st$short,
+        line = list(color = st$col, width = 2),
+        marker = list(color = st$col, size = 8, symbol = st$symbol,
+                      line = list(color = COL$card, width = 2)),
+        text = ~hover,
+        hoverinfo = "text", hoverlabel = list(bordercolor = st$col)
+      )
+    }
+    p |>
+      dark_layout(
+        xaxis = list(title = "← umpire right      inches from the zone edge      umpire wrong →",
+                     zeroline = FALSE, gridcolor = COL$grid, dtick = 1),
+        yaxis = list(title = "Share of opportunities challenged", tickformat = ".0%",
+                     zeroline = FALSE, gridcolor = COL$grid, rangemode = "tozero"),
+        shapes = list(list(type = "line", x0 = 0, x1 = 0, yref = "paper", y0 = 0, y1 = 1,
+                           line = list(color = COL$text2, width = 1, dash = "dot"))),
+        legend = list(orientation = "h", x = 0, y = -0.22),
+        margin = list(t = 10)
+      ) |>
+      config(displayModeBar = FALSE)
+  })
+  
+  output$zone_story <- renderUI({
+    s_cc <- sig("Catchers, catching")
+    s_cb <- sig("Catchers, batting")
+    s_ob <- sig("Other batters")
+    gap_total   <- s_ob - s_cc
+    kept_share  <- (s_ob - s_cb) / gap_total     # share of the catcher edge kept at bat
+    
+    verdict <- if (kept_share < 0.25) {
+      "It's the view."
+    } else if (kept_share > 0.75) {
+      "It's the player."
+    } else {
+      "A bit of both."
+    }
+    # If the confidence intervals overlap, a point-estimate % would overclaim.
+    cb_row <- sigma_groups[sigma_groups$group == "Catchers, batting", ]
+    ob_row <- sigma_groups[sigma_groups$group == "Other batters", ]
+    overlap <- cb_row$sigma_lo <= ob_row$sigma_hi && ob_row$sigma_lo <= cb_row$sigma_hi
+    explain <- if (overlap) {
+      "Statistically indistinguishable from other hitters: their edge doesn't come with them."
+    } else {
+      sprintf("Catchers keep about %.0f%% of their edge when they step into the box.",
+              100 * max(min(kept_share, 1), 0))
+    }
+    
+    cb <- grades |>
+      filter(role == "batter", challenges > 0) |>
+      group_by(is_catcher) |>
+      summarise(won = sum(wins) / sum(challenges),
+                pos_ev = 1 - sum(bad_challenges) / sum(challenges),
+                .groups = "drop")
+    pct <- \(flag, col) sprintf("%.0f%%", 100 * cb[[col]][cb$is_catcher == flag])
+    
+    row <- function(label, a, b) tags$tr(tags$td(class = "text-secondary", label),
+                                         tags$td(class = "text-center", a),
+                                         tags$td(class = "text-center", b))
+    tagList(
+      div(class = "stat-value", style = sprintf("font-size:2rem; color:%s;", COL$text1), verdict),
+      p(sprintf("From behind the plate, catchers read the zone to ±%.1f in, about %.1f× sharper than hitters (±%.1f in).",
+                s_cc, s_ob / s_cc, s_ob)),
+      p(sprintf("The same catchers at the plate: ±%.1f in. %s", s_cb, explain)),
+      p(class = "text-secondary",
+        "Behind the plate a catcher sees the pitch arrive head-on, all the way into his glove.",
+        " A hitter sees it from the side, while deciding whether to swing."),
+      tags$table(
+        class = "table table-sm mt-2 mb-0", style = sprintf("--bs-table-bg: transparent; color:%s;", COL$text1),
+        tags$thead(tags$tr(tags$th(""), tags$th(class = "text-center", "Catchers at bat"),
+                           tags$th(class = "text-center", "Other batters"))),
+        tags$tbody(
+          row("Challenges won", pct(TRUE, "won"), pct(FALSE, "won")),
+          row("Challenges that were good bets", pct(TRUE, "pos_ev"), pct(FALSE, "pos_ev"))
+        )
+      )
+    )
   })
   
   # -- Pitch card (click a pitch) ---------------------------------------------
