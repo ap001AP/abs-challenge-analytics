@@ -2,13 +2,20 @@
 # Pull every ABS challenge of the 2026 regular season from the MLB Stats API
 # game feed, then validate against each game's official challenge totals.
 #
+# Why the Stats API: Statcast has no challenge flag. The live game feed does:
 #   gameData.absChallenges -> official per-team totals (used for validation)
 #   reviewDetails          -> one per challenge, found in TWO places:
 #     1. allPlays[].playEvents[].reviewDetails  (challenge mid at-bat)
 #     2. allPlays[].reviewDetails               (challenge on the at-bat's final
 #        pitch, e.g. strike three / ball four; attached to the play, not the pitch)
+#   Parsing only (1) undercounted 2,110 of 4,858 team-games.
+#   3. Inside reviewDetails$additionalReviews, when ONE play has two reviews
+#      (e.g. strike-'em-out-throw-'em-out: an ABS challenge on strike three
+#      plus a replay challenge on the tag). The replay can take the primary
+#      slot, hiding the ABS challenge one level down (found via game 822717).
 # reviewType "MJ" = ABS ball/strike challenge (other codes = video replay).
 #
+# Join key to Statcast (verified on game 824027):
 #   at_bat_number = atBatIndex + 1     (feed is 0-indexed, Statcast 1-indexed)
 #   pitch_number  = pitchNumber
 
@@ -27,7 +34,7 @@ FEED_FIELDS <- paste(c(
   "gameData", "absChallenges", "hasChallenges", "usedSuccessful", "usedFailed",
   "remaining", "teams", "home", "away", "id",
   "liveData", "plays", "allPlays", "about", "atBatIndex", "inning",
-  "isTopInning", "playEvents", "pitchNumber", "isPitch", "reviewDetails",
+  "isTopInning", "playEvents", "pitchNumber", "isPitch", "reviewDetails", "additionalReviews",
   "isOverturned", "reviewType", "challengeTeamId", "player", "details", "code"
 ), collapse = ",")
 
@@ -49,6 +56,8 @@ fetch_game <- function(pk, retries = 3) {
       paste(readLines(url(feed_url(pk)), warn = FALSE), collapse = ""),
       error = function(e) NULL
     )
+    # Only cache responses that actually parse, so a bad response isn't
+    # "remembered" as done.
     ok <- !is.null(txt) && !inherits(try(parse_json(txt), silent = TRUE), "try-error")
     if (ok) {
       con <- gzfile(path, "w"); writeLines(txt, con); close(con)
@@ -107,6 +116,13 @@ review_row <- function(pk, play, ev, rd, level) {
 
 is_abs <- function(rd) identical(rd[["reviewType"]], "MJ")
 
+# All ABS reviews inside one reviewDetails: the primary one plus any nested
+# in additionalReviews. Returns a list (possibly empty).
+abs_reviews <- function(rd) {
+  if (is.null(rd)) return(list())
+  keep(c(list(rd), rd[["additionalReviews"]] %||% list()), is_abs)
+}
+
 parse_feed <- function(feed, pk) {
   plays <- feed[["liveData"]][["plays"]][["allPlays"]] %||% list()
   
@@ -116,16 +132,18 @@ parse_feed <- function(feed, pk) {
       
       # 1. Challenges attached to a specific pitch
       pitch_rows <- evs |>
-        keep(\(e) is_abs(e[["reviewDetails"]])) |>
-        map(\(e) review_row(pk, p, e, e[["reviewDetails"]], "pitch"))
+        map(\(e) map(abs_reviews(e[["reviewDetails"]]),
+                     \(rd) review_row(pk, p, e, rd, "pitch"))) |>
+        list_flatten()
       
       # 2. Challenge attached to the play -> applies to the at-bat's last pitch
       play_rows <- list()
-      if (is_abs(p[["reviewDetails"]])) {
+      play_abs  <- abs_reviews(p[["reviewDetails"]])
+      if (length(play_abs) > 0) {
         pitches <- keep(evs, \(e) isTRUE(e[["isPitch"]]))
         if (length(pitches) > 0) {
-          play_rows <- list(review_row(pk, p, pitches[[length(pitches)]],
-                                       p[["reviewDetails"]], "play"))
+          last <- pitches[[length(pitches)]]
+          play_rows <- map(play_abs, \(rd) review_row(pk, p, last, rd, "play"))
         }
       }
       c(pitch_rows, play_rows)
@@ -152,6 +170,29 @@ parse_feed <- function(feed, pk) {
   )
   
   list(challenges = challenges, summary = summary)
+}
+
+# Older cached feeds were fetched before "additionalReviews" was in
+# FEED_FIELDS. An ABS challenge can only hide there when the primary review is
+# NOT ABS, so only games with a non-"MJ" review need re-downloading.
+refetch_for_additional_reviews <- function() {
+  has_non_abs_review <- function(obj) {
+    if (!is.list(obj)) return(FALSE)
+    rd <- obj[["reviewDetails"]]
+    if (!is.null(rd) && !is_abs(rd)) return(TRUE)
+    any(map_lgl(obj, has_non_abs_review))
+  }
+  
+  pks <- list.files(RAW_DIR, pattern = "\\.json\\.gz$") |>
+    sub(pattern = "\\.json\\.gz$", replacement = "")
+  todo <- keep(pks, \(pk) has_non_abs_review(read_feed(pk)))
+  message(length(todo), " games have a non-ABS review -> re-fetching")
+  
+  walk(todo, \(pk) {
+    file.remove(raw_path(pk))
+    fetch_game(pk)
+    Sys.sleep(0.3)
+  })
 }
 
 combine_challenges <- function() {
