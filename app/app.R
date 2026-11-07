@@ -14,6 +14,31 @@ decisions <- readRDS("app_data/decisions.rds")
 params    <- readRDS("app_data/params.rds")
 sigma_groups <- readRDS("app_data/sigma_groups.rds")
 read_curves  <- readRDS("app_data/read_curves.rds")
+league       <- readRDS("app_data/league.rds")
+
+REPO_URL <- "https://github.com/ap001AP/abs-challenge-analytics"
+RUNS_PER_WIN <- 10      # standard sabermetric rule of thumb
+N_TEAMS <- 30
+
+# Headline numbers, all derived from the data
+HL <- local({
+  tot <- grades |>
+    summarise(winnable = sum(winnable), wins = sum(wins),
+              runs_left = sum(ev_available) - sum(ev_captured))
+  by_role <- grades |>
+    group_by(role) |>
+    summarise(captured = sum(wins) / sum(winnable), .groups = "drop")
+  list(
+    captured   = tot$wins / tot$winnable,
+    left       = tot$winnable - tot$wins,
+    winnable   = tot$winnable,
+    runs_left  = tot$runs_left,
+    wins_left  = tot$runs_left / RUNS_PER_WIN,
+    per_team   = tot$runs_left / RUNS_PER_WIN / N_TEAMS,
+    cap_catch  = by_role$captured[by_role$role == "catcher"],
+    cap_bat    = by_role$captured[by_role$role == "batter"]
+  )
+})
 
 # ---- Design tokens: "neon scoreboard" dark theme ----------------------------
 # Data colours (teal / pink / purple) were run through a colour-blind
@@ -66,6 +91,19 @@ NEON_CSS <- sprintf("
   .form-select, .form-control { background-color: %1$s; border-color: %3$s; color: inherit; }
   .stat-value { font-family: Rajdhani, sans-serif; font-size: 1.6rem; font-weight: 700; }
   hr { border-color: %3$s; opacity: 1; }
+  .hero {
+    font-family: Rajdhani, sans-serif; font-weight: 700; font-size: 3.2rem; line-height: 1.1;
+    background: linear-gradient(90deg, %5$s, %7$s, %6$s);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .eyebrow { letter-spacing: .14em; text-transform: uppercase; font-size: .8rem; }
+  .btn-neon {
+    color: %5$s; border: 1px solid %5$s; background: transparent;
+    letter-spacing: .04em;
+  }
+  .btn-neon:hover, .btn-neon:focus {
+    color: %1$s; background: %5$s; box-shadow: 0 0 16px rgba(46,230,214,.6);
+  }
   .text-secondary { color: %4$s !important; }
 ", COL$surface, COL$card, COL$border, COL$text2,
                     COL$neon_teal, COL$neon_pink, COL$neon_purp)
@@ -215,6 +253,50 @@ sigma_card <- function(g) {
   )
 }
 
+# ---- Headline helpers -----------------------------------------------------------
+comma <- function(x) formatC(round(x), format = "d", big.mark = ",")
+
+# 0.75 -> "3 of every 4"; falls back to a percentage if no simple fraction fits
+as_fraction <- function(p) {
+  fr <- list(c(1, 2), c(2, 3), c(3, 4), c(4, 5), c(1, 3), c(1, 4))
+  for (f in fr) if (abs(p - f[1] / f[2]) < 0.03) return(sprintf("%d of every %d", f[1], f[2]))
+  sprintf("%.0f%%", 100 * p)
+}
+
+stat_tile <- function(value, label, sub, col) {
+  card(
+    style = sprintf("border-top: 3px solid %s;", col),
+    card_body(
+      class = "text-center", fillable = FALSE,
+      div(class = "stat-value mb-1",
+          style = sprintf("font-size:2.6rem; color:%s; text-shadow:0 0 16px %s88;", COL$text1, col),
+          value),
+      div(class = "fw-semibold", label),
+      div(class = "small text-secondary", sub)
+    )
+  )
+}
+
+neon_bar <- function(label, value, col) {
+  div(class = "mb-3",
+      div(class = "d-flex justify-content-between align-items-baseline mb-1",
+          span(label),
+          span(class = "stat-value", style = "font-size:1.2rem;", sprintf("%.0f%%", 100 * value))),
+      div(style = sprintf("height:12px; border-radius:6px; background:%s; border:1px solid %s;",
+                          COL$surface, COL$border),
+          div(style = sprintf("width:%.1f%%; height:100%%; border-radius:6px; background:%s; box-shadow:0 0 12px %s;",
+                              100 * value, col, col))))
+}
+
+explore_card <- function(title, text, button_id, button_label) {
+  card(card_body(
+    class = "d-flex flex-column",
+    h5(class = "mb-2", title),
+    p(class = "text-secondary", text),
+    div(class = "mt-auto", actionButton(button_id, button_label, class = "btn-neon w-100"))
+  ))
+}
+
 coming_soon <- function(title, text) {
   card(card_header(title), p(class = "text-secondary", text))
 }
@@ -222,6 +304,7 @@ coming_soon <- function(title, text) {
 # ---- UI ---------------------------------------------------------------------
 
 ui <- page_navbar(
+  id = "nav",
   title = "Tap or Don't Tap: MLB ABS Challenges, 2026",
   fillable = FALSE,   # let the page scroll; never squash a card's plot
   theme = bs_theme(
@@ -231,11 +314,82 @@ ui <- page_navbar(
     heading_font = font_google("Rajdhani")
   ) |> bs_add_rules(NEON_CSS),
   
-  nav_panel("Headline",
-            coming_soon("Coming next", "Players let 3 of 4 winnable challenges go.")),
+  nav_panel(
+    "Headline", value = "headline",
+    div(class = "py-4",
+        div(class = "eyebrow text-secondary mb-2",
+            "2026 · Year one of MLB's ABS challenge system"),
+        div(class = "hero mb-3",
+            sprintf("MLB players let %s winnable challenges go.", as_fraction(1 - HL$captured))),
+        p(class = "lead text-secondary mb-4",
+          sprintf("We graded all %s ABS challenges of the season, and the %s missed calls nobody challenged.",
+                  comma(league$n_challenges), comma(HL$left))),
+        
+        layout_columns(
+          col_widths = c(3, 3, 3, 3),
+          stat_tile(comma(league$n_challenges), "challenges made",
+                    sprintf("%.0f%% overturned", 100 * league$overturn_rate), COL$won),
+          stat_tile(sprintf("%.1f%%", 100 * league$ump_accuracy), "of called pitches the ump got right",
+                    sprintf("%s called pitches", comma(league$n_takes)), COL$missed),
+          stat_tile(sprintf("~%.0f", HL$runs_left), "runs left on the table",
+                    sprintf("≈ %.0f wins league-wide, ~%.0f per team", HL$wins_left, HL$per_team), COL$lost),
+          stat_tile(sprintf("%.1f×", sig("Other batters") / sig("Catchers, catching")),
+                    "sharper read from behind the plate",
+                    sprintf("catchers ±%.1f in vs hitters ±%.1f in",
+                            sig("Catchers, catching"), sig("Other batters")), COL$won)
+        ),
+        
+        layout_columns(
+          col_widths = c(5, 7),
+          card(
+            card_header("Winnable missed calls actually challenged and won"),
+            card_body(
+              neon_bar("Catchers (calls against their pitcher)", HL$cap_catch, COL$won),
+              neon_bar("Batters (calls against themselves)",     HL$cap_bat,   COL$lost),
+              neon_bar("League-wide (catchers + batters combined)", HL$captured, COL$missed),
+              p(class = "small text-secondary mb-0",
+                "A winnable call = the umpire missed it and the player's team still had a challenge.")
+            )
+          ),
+          layout_columns(
+            col_widths = c(4, 4, 4),
+            explore_card("Who sees the zone?",
+                         "Catchers read pitches far better than hitters, but only from behind the plate.",
+                         "go_zone", "Explore →"),
+            explore_card("Brave or Chicken?",
+                         "Every catcher and batter graded on how often, and how wisely, they challenge.",
+                         "go_quad", "Explore →"),
+            explore_card("Should he have tapped?",
+                         "Pick a count and a pitch location. See if a challenge is worth it.",
+                         "go_tap", "Explore →")
+          )
+        ),
+        
+        card(
+          card_header("How it works"),
+          card_body(
+            layout_columns(
+              col_widths = c(3, 3, 3, 3),
+              div(strong("1 · Data"), p(class = "small text-secondary",
+                                        sprintf("%s pitches from %s games (Statcast via baseballr) + every challenge from the MLB Stats API game feeds.",
+                                                comma(league$n_pitches), comma(league$n_games)))),
+              div(strong("2 · Validation"), p(class = "small text-secondary",
+                                              "Every captured challenge reconciled against MLB's official per-team totals: 100% of team-games match.")),
+              div(strong("3 · Model"), p(class = "small text-secondary",
+                                         "A probit model of challenge behaviour estimates how precisely each group reads the zone, and so how confident a player should be.")),
+              div(strong("4 · Grade"), p(class = "small text-secondary",
+                                         "Each decision is valued in runs from the count, outs and bases. Good decisions are graded, not lucky outcomes."))
+            ),
+            div(class = "small text-secondary",
+                "Built with R, Shiny, bslib and plotly · ",
+                tags$a(href = REPO_URL, target = "_blank", "Source on GitHub"))
+          )
+        )
+    )
+  ),
   
   nav_panel(
-    "Who Sees the Zone",
+    "Who Sees the Zone", value = "zone",
     div(class = "py-3",
         h3(class = "mb-1", "Who sees the zone best?"),
         p(class = "text-secondary mb-3",
@@ -268,7 +422,7 @@ ui <- page_navbar(
   ),
   
   nav_panel(
-    "Brave · Reckless · Chicken · Lost",
+    "Brave · Reckless · Chicken · Lost", value = "quad",
     layout_sidebar(
       sidebar = sidebar(
         radioButtons("role", "Decision-maker",
@@ -310,7 +464,7 @@ ui <- page_navbar(
     )
   ),
   
-  nav_panel("Should He Have Tapped?",
+  nav_panel("Should He Have Tapped?", value = "tap",
             coming_soon("Coming next", "Drag a pitch around the zone: P(win), breakeven and EV live.")),
   
   nav_panel("Robbed",
@@ -321,6 +475,10 @@ ui <- page_navbar(
 
 server <- function(input, output, session) {
   
+  observeEvent(input$go_zone, nav_select("nav", "zone"))
+  observeEvent(input$go_quad, nav_select("nav", "quad"))
+  observeEvent(input$go_tap,  nav_select("nav", "tap"))
+  
   graded <- reactive({
     grades |>
       filter(graded, role == input$role) |>
@@ -330,14 +488,20 @@ server <- function(input, output, session) {
   # Clicked player; falls back to the highlighted team's busiest challenger.
   clicked <- reactiveVal(NULL)
   observeEvent(list(input$role, input$team), clicked(NULL))
-  observeEvent(event_data("plotly_click", source = "quad"), {
-    clicked(as.integer(event_data("plotly_click", source = "quad")$key))
+  click_key <- function(src) {
+    ev  <- suppressWarnings(event_data("plotly_click", source = src))
+    key <- suppressWarnings(as.integer(ev$key))
+    if (length(key) == 1 && !is.na(key)) key else NULL
+  }
+  observeEvent(suppressWarnings(event_data("plotly_click", source = "quad")), {
+    k <- click_key("quad")
+    if (!is.null(k)) clicked(k)
   })
   
   sel_id <- reactive({
     g  <- graded()
     id <- clicked()
-    if (is.null(id) || !(id %in% g$decider_id)) {
+    if (length(id) != 1 || is.na(id) || !(id %in% g$decider_id)) {
       pool <- if (any(g$hl)) filter(g, hl) else g
       id <- pool$decider_id[which.max(pool$challenges)]
     }
@@ -350,8 +514,9 @@ server <- function(input, output, session) {
   # Clicked pitch; cleared whenever the player changes.
   clicked_pitch <- reactiveVal(NULL)
   observeEvent(sel_id(), clicked_pitch(NULL))
-  observeEvent(event_data("plotly_click", source = "zone"), {
-    clicked_pitch(as.integer(event_data("plotly_click", source = "zone")$key))
+  observeEvent(suppressWarnings(event_data("plotly_click", source = "zone")), {
+    k <- click_key("zone")
+    if (!is.null(k)) clicked_pitch(k)
   })
   
   # -- Quadrant ---------------------------------------------------------------
@@ -382,8 +547,8 @@ server <- function(input, output, session) {
       p <- p |>
         # Soft neon halo behind the highlighted team (decoration only)
         add_markers(
-          data = team_g, x = ~agg_log2, y = ~selectivity, hoverinfo = "none",
-          showlegend = FALSE,
+          data = team_g, x = ~agg_log2, y = ~selectivity, key = ~decider_id,
+          hoverinfo = "none", showlegend = FALSE,
           marker = list(size = 26, color = COL$neon_teal, opacity = 0.18, line = list(width = 0))
         ) |>
         add_markers(
@@ -403,8 +568,8 @@ server <- function(input, output, session) {
     sel <- filter(g, decider_id == sel_id())
     if (nrow(sel) > 0) {
       p <- p |> add_markers(
-        data = sel, x = ~agg_log2, y = ~selectivity, hoverinfo = "none",
-        name = "Selected",
+        data = sel, x = ~agg_log2, y = ~selectivity, key = ~decider_id,
+        hoverinfo = "none", name = "Selected",
         marker = list(size = 22, symbol = "circle-open", color = COL$text1,
                       line = list(width = 2, color = COL$text1))
       )
@@ -431,7 +596,8 @@ server <- function(input, output, session) {
         legend = list(orientation = "h", x = 0, y = -0.14),
         margin = list(t = 10)
       ) |>
-      config(displayModeBar = FALSE)
+      config(displayModeBar = FALSE) |>
+      event_register("plotly_click")
   })
   
   # -- Player panel -----------------------------------------------------------
@@ -497,8 +663,8 @@ server <- function(input, output, session) {
     picked <- filter(d, pitch_id %in% clicked_pitch())
     if (nrow(picked) > 0) {
       p <- p |> add_markers(
-        data = picked, x = ~plate_x, y = ~z_std, hoverinfo = "none",
-        showlegend = FALSE,
+        data = picked, x = ~plate_x, y = ~z_std, key = ~pitch_id,
+        hoverinfo = "none", showlegend = FALSE,
         marker = list(size = 22, symbol = "circle-open", color = COL$text1,
                       line = list(width = 2, color = COL$text1))
       )
@@ -522,7 +688,8 @@ server <- function(input, output, session) {
         legend = list(orientation = "h", x = 0, y = -0.02),
         margin = list(t = 5, b = 5, l = 5, r = 5)
       ) |>
-      config(displayModeBar = FALSE)
+      config(displayModeBar = FALSE) |>
+      event_register("plotly_click")
   })
   
   # -- Who Sees the Zone -------------------------------------------------------

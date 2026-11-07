@@ -97,6 +97,21 @@ export_app_data <- function() {
     list_rbind()
   curves <- read_curves(opps_g)
   
+  # League-wide headline numbers (tiny; keeps the app free of the big tables)
+  takes <- read_parquet(file.path("data", "takes_2026.parquet"),
+                        col_select = c("game_pk", "missed_call"))
+  chal  <- read_parquet(file.path("data", "challenges_2026.parquet"))
+  league <- list(
+    n_pitches     = nrow(read_parquet(file.path("data", "statcast_2026.parquet"),
+                                      col_select = "game_pk")),
+    n_games       = n_distinct(takes$game_pk),
+    n_takes       = nrow(takes),
+    ump_accuracy  = mean(!takes$missed_call, na.rm = TRUE),
+    n_challenges  = nrow(chal),
+    overturn_rate = mean(chal$overturned, na.rm = TRUE)
+  )
+  saveRDS(league, file.path(APP_DATA, "league.rds"))
+  
   saveRDS(grades,       file.path(APP_DATA, "grades.rds"))
   saveRDS(params,       file.path(APP_DATA, "params.rds"))
   saveRDS(decisions,    file.path(APP_DATA, "decisions.rds"))
