@@ -11,6 +11,12 @@ library(dplyr)
 library(purrr)
 library(arrow)
 
+# By default {arrow} returns ALTREP columns: R vectors still backed by Arrow
+# memory. saveRDS() then writes them AS Arrow objects, and a machine without
+# {arrow} (the deploy server) reads every column back as length 0.
+# Force plain R vectors so the .rds files are self-contained.
+options(arrow.use_altrep = FALSE)
+
 APP_DATA <- file.path("app", "app_data")
 GROUP_LEVELS <- c("Catchers, catching", "Catchers, batting", "Other batters")
 
@@ -119,6 +125,18 @@ export_app_data <- function() {
   saveRDS(curves,       file.path(APP_DATA, "read_curves.rds"))
   
   print(sigma_groups |> mutate(across(where(is.double), \(x) round(x, 2))))
+  
+  # Prove the files load WITHOUT arrow, the way the deploy server will.
+  check <- callr::r(function(dir) {
+    files <- list.files(dir, pattern = "\\.rds$", full.names = TRUE)
+    vapply(files, function(f) {
+      x <- readRDS(f)
+      if (is.data.frame(x)) all(lengths(x) == nrow(x)) else TRUE
+    }, logical(1))
+  }, args = list(dir = APP_DATA),
+  libpath = .Library)   # base R only: no {arrow}, just like the server
+  if (!all(check)) stop("Not self-contained: ", paste(basename(names(check)[!check]), collapse = ", "))
+  message("✓ All app data loads cleanly without {arrow}")
   
   sizes <- file.size(list.files(APP_DATA, full.names = TRUE)) / 1024
   message(sprintf("Exported %d players, %s decisions -> %s (%.0f KB total)",
