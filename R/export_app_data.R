@@ -103,6 +103,19 @@ export_app_data <- function() {
     list_rbind()
   curves <- read_curves(opps_g)
   
+  # "Should He Have Tapped?": run value of an overturn for every game state
+  # The full 288-state table from our RE288 (build_dataset.R), so every state
+  # in the calculator has a value, including ones with no opportunities.
+  overturn_values <- read_parquet(file.path("data", "overturn_values_2026.parquet")) |>
+    select(balls, strikes, outs_when_up, bases, overturn_value)
+  saveRDS(overturn_values, file.path(APP_DATA, "overturn_values.rds"))
+  
+  # Shiny auto-loads app/R/*.R, so ship the SAME zone-geometry code the
+  # analysis uses (one source of truth, already unit-tested).
+  dir.create(file.path("app", "R"), showWarnings = FALSE)
+  file.copy(file.path("R", "abs_zone.R"), file.path("app", "R", "abs_zone.R"),
+            overwrite = TRUE)
+  
   # League-wide headline numbers (tiny; keeps the app free of the big tables)
   takes <- read_parquet(file.path("data", "takes_2026.parquet"),
                         col_select = c("game_pk", "missed_call"))

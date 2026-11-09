@@ -15,6 +15,7 @@ library(arrow)
 
 source("R/abs_zone.R")
 source("R/challenge_state.R")
+source("R/run_expectancy.R")
 
 SEASON_FILE <- file.path("data", "statcast_2026.parquet")
 CHAL_FILE   <- file.path("data", "challenges_2026.parquet")
@@ -26,9 +27,8 @@ OUT_FILE    <- file.path("data", "takes_2026.parquet")
 #   breakeven confidence = 0.2 / (0.2 + run value of the overturn)
 CHALLENGE_VALUE_RUNS <- 0.2
 
-# Minimum takes per (count, outs, bases, call) cell before trusting its
-# run-value estimate; sparser cells fall back to (count, outs) only.
-MIN_CELL <- 20L
+RE_FILE <- file.path("data", "re288_2026.parquet")
+OV_FILE <- file.path("data", "overturn_values_2026.parquet")
 
 # Statcast descriptions that are called pitches (no swing), and their call.
 # Excludes automatic_ball / automatic_strike (pitch-clock violations), which
@@ -36,37 +36,14 @@ MIN_CELL <- 20L
 TAKE_CODES <- c(called_strike = "S", ball = "B", blocked_ball = "B")
 
 # ---- Run value of an overturn -----------------------------------------------
-# For each game state, the run value of a ball vs a strike is estimated from
-# Statcast's delta_run_exp (change in batting-team run expectancy on that
-# pitch, including walks/strikeouts). Overturn value = E[ball] - E[strike].
-
-re_table <- function(takes, keys) {
+# From our own RE288 table (R/run_expectancy.R), NOT Statcast's delta_run_exp,
+# which is nearly context-free at the end of a plate appearance and valued a
+# bases-loaded full count like a bases-empty one.
+add_overturn_value <- function(takes, ov_table) {
   takes |>
-    filter(!is.na(delta_run_exp)) |>
-    group_by(across(all_of(c(keys, "final_call")))) |>
-    summarise(re = mean(delta_run_exp), n = n(), .groups = "drop") |>
-    pivot_wider(names_from = final_call, values_from = c(re, n),
-                values_fill = list(n = 0L))
-}
-
-add_overturn_value <- function(takes) {
-  state_fine   <- c("balls", "strikes", "outs_when_up", "bases")
-  state_coarse <- c("balls", "strikes", "outs_when_up")
-  
-  fine <- re_table(takes, state_fine) |>
-    rename(re_B_f = re_B, re_S_f = re_S, n_B_f = n_B, n_S_f = n_S)
-  coarse <- re_table(takes, state_coarse) |>
-    transmute(across(all_of(state_coarse)), re_B_c = re_B, re_S_c = re_S)
-  
-  takes |>
-    left_join(fine,   by = state_fine) |>
-    left_join(coarse, by = state_coarse) |>
-    mutate(
-      use_fine = coalesce(n_B_f, 0L) >= MIN_CELL & coalesce(n_S_f, 0L) >= MIN_CELL,
-      overturn_value = if_else(use_fine, re_B_f - re_S_f, re_B_c - re_S_c),
-      breakeven_conf = CHALLENGE_VALUE_RUNS / (CHALLENGE_VALUE_RUNS + overturn_value)
-    ) |>
-    select(-c(re_B_f, re_S_f, n_B_f, n_S_f, re_B_c, re_S_c, use_fine))
+    left_join(ov_table |> select(balls, strikes, outs_when_up, bases, overturn_value),
+              by = c("balls", "strikes", "outs_when_up", "bases")) |>
+    mutate(breakeven_conf = CHALLENGE_VALUE_RUNS / (CHALLENGE_VALUE_RUNS + overturn_value))
 }
 
 # ---- Main -------------------------------------------------------------------
@@ -107,6 +84,13 @@ build_dataset <- function() {
       fld_rem = if_else(inning_topbot == "Top", home_rem, away_rem)
     )
   
+  # Run expectancy from every pitch of the season -> value of each flip
+  re_data  <- runs_to_inning_end(pitches)
+  re288    <- compute_re288(re_data)
+  ov_table <- overturn_values_from_re(re288)
+  write_parquet(re288, RE_FILE)
+  write_parquet(ov_table, OV_FILE)
+  
   # 2. Takes only, with calls, geometry and opportunity flags.
   takes <- pitches |>
     filter(description %in% names(TAKE_CODES)) |>
@@ -139,7 +123,7 @@ build_dataset <- function() {
         TRUE                         ~ "other"
       )
     ) |>
-    add_overturn_value() |>
+    add_overturn_value(ov_table) |>
     select(
       all_of(keys), game_date, home_team, away_team, inning, inning_topbot,
       batter, pitcher, catcher = fielder_2, player_name, stand, p_throws,
@@ -155,14 +139,14 @@ build_dataset <- function() {
     )
   
   write_parquet(takes, OUT_FILE)
-  validate_dataset(takes, chal)
+  validate_dataset(takes, chal, re288, ov_table, re_data)
   invisible(takes)
 }
 
 # ---- Validation -------------------------------------------------------------
 # Each line should be close to 100% / 0. Anything else is a bug to chase.
 
-validate_dataset <- function(takes, chal) {
+validate_dataset <- function(takes, chal, re288, ov_table, re_data) {
   ch  <- filter(takes, challenged)
   pct <- \(x) sprintf("%.2f%%", 100 * mean(x, na.rm = TRUE))
   
@@ -177,6 +161,30 @@ validate_dataset <- function(takes, chal) {
   cat("  ...of which winnable (missed calls):  ", format(sum(takes$winnable_opp, na.rm = TRUE), big.mark = ","), "\n")
   cat("Challenger roles:\n"); print(count(ch, challenger_role))
   
+  cat("\n== Run expectancy ==\n")
+  cat("Pitches used:", format(nrow(re_data), big.mark = ","), "\n")
+  cat("RE24 (runs to end of inning at a 0-0 count). Typical MLB: empty ~0.5/0.27/0.1,",
+      "loaded ~2.3/1.5/0.75\n")
+  re288 |>
+    filter(balls == 0, strikes == 0) |>
+    mutate(re = round(re, 2)) |>
+    select(bases, outs_when_up, re) |>
+    pivot_wider(names_from = outs_when_up, values_from = re, names_prefix = "outs_") |>
+    print()
+  cat("Overturn value range:", sprintf("%.3f to %.3f", min(ov_table$overturn_value),
+                                       max(ov_table$overturn_value)),
+      "(must be >= 0)\n")
+  adj <- ov_table |> mutate(change = overturn_value - raw_value)
+  cat("Monotone constraint: raw negatives", sum(adj$raw_value < 0), "of", nrow(adj),
+      "| states moved > 0.02 runs:", sum(abs(adj$change) > 0.02),
+      "| largest move:", sprintf("%.3f", max(abs(adj$change))), "\n")
+  cat("Check: 3-2 values (walk vs strikeout):\n")
+  ov_table |>
+    filter(balls == 3, strikes == 2) |>
+    mutate(overturn_value = round(overturn_value, 2)) |>
+    select(bases, outs_when_up, overturn_value) |>
+    pivot_wider(names_from = outs_when_up, values_from = overturn_value, names_prefix = "outs_") |>
+    print()
   cat("\nMean overturn value (runs) by count:\n")
   takes |>
     group_by(balls, strikes) |>

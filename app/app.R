@@ -15,6 +15,8 @@ params    <- readRDS("app_data/params.rds")
 sigma_groups <- readRDS("app_data/sigma_groups.rds")
 read_curves  <- readRDS("app_data/read_curves.rds")
 league       <- readRDS("app_data/league.rds")
+overturn_values <- readRDS("app_data/overturn_values.rds")
+# edge_distance_in(), abs_call() etc. come from app/R/abs_zone.R (auto-loaded)
 
 REPO_URL <- "https://github.com/ap001AP/abs-challenge-analytics"
 RUNS_PER_WIN <- 10      # standard sabermetric rule of thumb
@@ -253,6 +255,30 @@ sigma_card <- function(g) {
   )
 }
 
+# ---- Should He Have Tapped? helpers ----------------------------------------------
+CHALLENGE_VALUE_RUNS <- 0.2
+SIGMA_ROLE <- setNames(params$sigma_in, params$role)          # batter / catcher
+STD_TOP <- 3.5; STD_BOT <- 1.5                                # standard zone (ft)
+TAP_XS <- seq(-1.6, 1.6, by = 0.04)
+TAP_ZS <- seq(0.8, 4.2, by = 0.04)
+
+lookup_value <- function(b, s, o, bs) {
+  r <- overturn_values[overturn_values$balls == b & overturn_values$strikes == s &
+                         overturn_values$outs_when_up == o & overturn_values$bases == bs, ]
+  if (nrow(r) > 0) return(r$overturn_value[1])
+  r <- overturn_values[overturn_values$balls == b & overturn_values$strikes == s &
+                         overturn_values$outs_when_up == o, ]
+  mean(r$overturn_value)    # rare state: fall back to count + outs
+}
+
+# P(win) and EV of challenging a pitch at (x, z) in a given situation
+tap_eval <- function(x, z, st) {
+  d   <- edge_distance_in(x, z, STD_TOP, STD_BOT)  # > 0: ball misses the zone
+  win <- if (st$call == "S") d else -d             # > 0: umpire got it wrong
+  p   <- pnorm(win / st$sigma)
+  list(edge = d, p = p, ev = p * st$v - (1 - p) * CHALLENGE_VALUE_RUNS)
+}
+
 # ---- Headline helpers -----------------------------------------------------------
 comma <- function(x) formatC(round(x), format = "d", big.mark = ",")
 
@@ -464,8 +490,44 @@ ui <- page_navbar(
     )
   ),
   
-  nav_panel("Should He Have Tapped?", value = "tap",
-            coming_soon("Coming next", "Drag a pitch around the zone: P(win), breakeven and EV live.")),
+  nav_panel(
+    "Should He Have Tapped?", value = "tap",
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 290,
+        radioButtons("tap_call", "The umpire called it a…",
+                     c("Strike (batter decides)" = "S", "Ball (catcher decides)" = "B")),
+        div(class = "d-flex gap-3",
+            selectInput("tap_balls", "Balls", 0:3, selected = 1, width = "90px"),
+            selectInput("tap_strikes", "Strikes", 0:2, selected = 2, width = "90px")),
+        radioButtons("tap_outs", "Outs", 0:2, selected = 1, inline = TRUE),
+        checkboxGroupInput("tap_runners", "Runners on",
+                           c("1st", "2nd", "3rd"), inline = TRUE),
+        selectInput("tap_eyes", "Whose eyes?",
+                    c("Realistic (whoever decides)" = "real",
+                      "Give him a catcher's eye" = "catcher",
+                      "Give him a batter's eye" = "batter")),
+        hr(),
+        p(class = "small text-secondary",
+          "Click anywhere on the map to place the pitch. The ○ is a baseball, to scale.")
+      ),
+      layout_columns(
+        col_widths = c(7, 5),
+        card(
+          card_header("Where is a challenge worth it?"),
+          plotlyOutput("tap_map", height = "560px"),
+          p(class = "small text-secondary mb-0",
+            "Teal: tapping gains runs on average. Pink: it costs runs. The dotted line is",
+            " the tap line, where the expected gain is exactly zero. Change the count and",
+            " watch it move.")
+        ),
+        card(
+          card_header("The decision"),
+          card_body(fillable = FALSE, uiOutput("tap_result"))
+        )
+      )
+    )
+  ),
   
   nav_panel("Robbed",
             coming_soon("Coming next", "The unluckiest hard-hit balls of 2026."))
@@ -690,6 +752,143 @@ server <- function(input, output, session) {
       ) |>
       config(displayModeBar = FALSE) |>
       event_register("plotly_click")
+  })
+  
+  # -- Should He Have Tapped? -------------------------------------------------
+  tap_pt <- reactiveVal(list(x = 0.80, z = 2.50))     # just off the corner
+  observeEvent(suppressWarnings(event_data("plotly_click", source = "tap")), {
+    ev <- suppressWarnings(event_data("plotly_click", source = "tap"))
+    if (length(ev$x) == 1 && !is.na(ev$x)) tap_pt(list(x = ev$x, z = ev$y))
+  })
+  
+  tap_state <- reactive({
+    bs   <- paste0(as.integer(c("1st", "2nd", "3rd") %in% input$tap_runners), collapse = "")
+    v    <- lookup_value(as.integer(input$tap_balls), as.integer(input$tap_strikes),
+                         as.integer(input$tap_outs), bs)
+    role <- if (input$tap_call == "S") "batter" else "catcher"
+    sigma <- switch(input$tap_eyes, real = SIGMA_ROLE[[role]],
+                    catcher = SIGMA_ROLE[["catcher"]], batter = SIGMA_ROLE[["batter"]])
+    list(call = input$tap_call, role = role, sigma = sigma, v = v, bases = bs,
+         balls = as.integer(input$tap_balls), strikes = as.integer(input$tap_strikes),
+         outs = as.integer(input$tap_outs),
+         breakeven = CHALLENGE_VALUE_RUNS / (CHALLENGE_VALUE_RUNS + v))
+  })
+  
+  output$tap_map <- renderPlotly({
+    st <- tap_state()
+    pt <- tap_pt()
+    grid <- expand.grid(x = TAP_XS, z = TAP_ZS)
+    r    <- tap_eval(grid$x, grid$z, st)
+    ev_m <- matrix(r$ev, nrow = length(TAP_ZS), byrow = TRUE)   # rows = z
+    hov  <- matrix(sprintf("EV %+.2f runs<br>P(win) %.0f%%", r$ev, 100 * r$p),
+                   nrow = length(TAP_ZS), byrow = TRUE)
+    lim  <- max(CHALLENGE_VALUE_RUNS, st$v)
+    br   <- (2.9 / 2) / 12                                       # ball radius (ft)
+    
+    plot_ly(source = "tap") |>
+      add_heatmap(
+        x = TAP_XS, y = TAP_ZS, z = ev_m, text = hov, hoverinfo = "text",
+        zmin = -lim, zmax = lim, zmid = 0,
+        # Diverging: pink (costs runs) -> neutral -> teal (gains runs)
+        colorscale = list(c(0, COL$lost), c(0.5, COL$card), c(1, COL$won)),
+        colorbar = list(title = list(text = "EV (runs)", font = list(color = COL$text2)),
+                        tickfont = list(color = COL$text2), outlinewidth = 0, len = 0.6)
+      ) |>
+      add_contour(
+        x = TAP_XS, y = TAP_ZS, z = ev_m, showscale = FALSE, hoverinfo = "skip",
+        contours = list(start = 0, end = 0, size = 1, coloring = "none"),
+        line = list(color = COL$text1, width = 2, dash = "dot"), name = "Tap line"
+      ) |>
+      dark_layout(
+        xaxis = list(range = range(TAP_XS), title = "", showgrid = FALSE, zeroline = FALSE,
+                     showticklabels = FALSE, constrain = "domain", fixedrange = TRUE),
+        yaxis = list(range = range(TAP_ZS), title = "", showgrid = FALSE, zeroline = FALSE,
+                     showticklabels = FALSE, scaleanchor = "x", scaleratio = 1,
+                     constrain = "domain", fixedrange = TRUE),
+        shapes = list(
+          list(type = "rect", x0 = -ZONE_HALF_FT, x1 = ZONE_HALF_FT, y0 = STD_BOT, y1 = STD_TOP,
+               line = list(color = COL$text1, width = 2)),
+          list(type = "circle", x0 = pt$x - br, x1 = pt$x + br, y0 = pt$z - br, y1 = pt$z + br,
+               line = list(color = COL$text1, width = 2), fillcolor = "rgba(236,233,255,0.25)")
+        ),
+        showlegend = FALSE, margin = list(t = 5, b = 5, l = 5, r = 5)
+      ) |>
+      config(displayModeBar = FALSE) |>
+      event_register("plotly_click")
+  })
+  
+  output$tap_result <- renderUI({
+    st <- tap_state(); pt <- tap_pt()
+    r  <- tap_eval(pt$x, pt$z, st)
+    tossup <- abs(r$ev) < 0.005                  # within half a hundredth of a run
+    tap   <- r$ev > 0
+    truth <- abs_call(pt$x, pt$z, STD_TOP, STD_BOT)
+    wins  <- truth != st$call
+    col   <- if (tossup) COL$text2 else if (tap) COL$won else COL$lost
+    who   <- if (st$role == "batter") "The batter" else "The catcher"
+    eyes  <- if (input$tap_eyes == "real") "" else
+      sprintf(" (with a %s's eye)", if (input$tap_eyes == "catcher") "catcher" else "batter")
+    
+    edge_txt <- if (r$edge > 0) sprintf("The ball misses the zone by %.1f in.", r$edge)
+    else sprintf("The ball clips the zone by %.1f in.", -r$edge)
+    
+    bar <- div(
+      style = sprintf("position:relative; height:14px; border-radius:7px; background:%s; border:1px solid %s;",
+                      COL$surface, COL$border),
+      div(style = sprintf("width:%.1f%%; height:100%%; border-radius:7px; background:%s; box-shadow:0 0 12px %s;",
+                          100 * r$p, col, col)),
+      div(style = sprintf("position:absolute; left:%.1f%%; top:-6px; width:2px; height:24px; background:%s;",
+                          100 * st$breakeven, COL$text1))
+    )
+    
+    tagList(
+      div(class = "stat-value",
+          style = sprintf("font-size:3.4rem; color:%s; text-shadow:0 0 18px %s; line-height:1;", col, col),
+          if (tossup) "TOSS-UP" else if (tap) "TAP IT" else "HOLD"),
+      p(class = "mt-2",
+        if (tossup) sprintf("Either choice is fine%s: the expected gain is essentially zero. %s", eyes, edge_txt)
+        else sprintf("%s%s should %s. %s", who, eyes,
+                     if (tap) "challenge" else "keep the challenge in his pocket", edge_txt)),
+      
+      div(class = "d-flex justify-content-between small mt-3 mb-1",
+          span(sprintf("Chance of winning: %.0f%%", 100 * r$p)),
+          span(class = "text-secondary", sprintf("needs %.0f%%", 100 * st$breakeven))),
+      bar,
+      p(class = "small text-secondary mt-1",
+        "The white tick is the breakeven: the confidence needed for a challenge to pay off."),
+      
+      div(class = "d-flex align-items-center gap-4 flex-wrap my-3",
+          div(class = "text-center", diamond_svg(st$bases),
+              div(class = "small text-secondary", bases_text(st$bases))),
+          div(div(class = "fs-4 fw-semibold", sprintf("%d-%d", st$balls, st$strikes)),
+              div(class = "d-flex align-items-center gap-2",
+                  outs_dots(st$outs),
+                  span(class = "small text-secondary", sprintf("%d out", st$outs))))),
+      
+      tags$table(
+        class = "table table-sm mb-3",
+        style = sprintf("--bs-table-bg: transparent; color:%s;", COL$text1),
+        tags$tbody(
+          tags$tr(tags$td(class = "text-secondary", "Flipping this call is worth"),
+                  tags$td(class = "text-end", sprintf("%.2f runs", st$v))),
+          tags$tr(tags$td(class = "text-secondary", "A lost challenge costs"),
+                  tags$td(class = "text-end", sprintf("%.2f runs", CHALLENGE_VALUE_RUNS))),
+          tags$tr(tags$td(class = "text-secondary", sprintf("%s's read error", if (input$tap_eyes == "batter" || (input$tap_eyes == "real" && st$role == "batter")) "Batter" else "Catcher")),
+                  tags$td(class = "text-end", sprintf("±%.1f in", st$sigma))),
+          tags$tr(tags$td(strong("Expected value of tapping")),
+                  tags$td(class = "text-end", strong(sprintf("%+.3f runs", r$ev))))
+        )
+      ),
+      
+      div(class = "rounded p-2 small",
+          style = sprintf("border:1px dashed %s;", COL$border),
+          span(class = "text-secondary", "What ABS would say (the player can't see this): "),
+          strong(CALL_WORD[[truth]]), " · a challenge would ",
+          strong(if (wins) "WIN" else "LOSE"),
+          if (!tossup && tap != wins) span(class = "text-secondary",
+                                           if (tap) " (still the right call: good decisions can lose)"
+                                           else " (still right to hold: too risky to know)"))
+    )
   })
   
   # -- Who Sees the Zone -------------------------------------------------------
