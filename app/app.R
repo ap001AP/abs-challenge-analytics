@@ -16,6 +16,10 @@ sigma_groups <- readRDS("app_data/sigma_groups.rds")
 read_curves  <- readRDS("app_data/read_curves.rds")
 league       <- readRDS("app_data/league.rds")
 overturn_values <- readRDS("app_data/overturn_values.rds")
+robbed       <- readRDS("app_data/robbed.rds")
+luck         <- readRDS("app_data/luck.rds")
+park_bbe     <- readRDS("app_data/park_bbe.rds")
+stadiums     <- readRDS("app_data/stadiums.rds")
 # edge_distance_in(), abs_call() etc. come from app/R/abs_zone.R (auto-loaded)
 
 REPO_URL <- "https://github.com/ap001AP/abs-challenge-analytics"
@@ -107,6 +111,7 @@ NEON_CSS <- sprintf("
     color: %1$s; background: %5$s; box-shadow: 0 0 16px rgba(46,230,214,.6);
   }
   .text-secondary { color: %4$s !important; }
+
 ", COL$surface, COL$card, COL$border, COL$text2,
                     COL$neon_teal, COL$neon_pink, COL$neon_purp)
 
@@ -277,6 +282,62 @@ tap_eval <- function(x, z, st) {
   win <- if (st$call == "S") d else -d             # > 0: umpire got it wrong
   p   <- pnorm(win / st$sigma)
   list(edge = d, p = p, ev = p * st$v - (1 - p) * CHALLENGE_VALUE_RUNS)
+}
+
+# ---- Robbed helpers ---------------------------------------------------------------
+ROB_TEAMS <- sort(unique(robbed$team))
+
+# Statcast hit coordinates -> feet from home plate (home at 125.42, 198.27;
+# ~2.5 ft per unit is the standard approximation).
+spray_xy <- function(hc_x, hc_y) list(x = 2.5 * (hc_x - 125.42), y = 2.5 * (198.27 - hc_y))
+
+# Field outlines use add_paths(), NOT add_lines(): add_lines() sorts points by x
+# (fine for a time series), which scrambles a curved outline into zigzags.
+# A field drawn as line traces: foul lines, outfield wall (330 ft lines, 400 ft
+# centre), infield diamond, infield arc.
+field_traces <- function(p) {
+  th   <- seq(-pi / 4, pi / 4, length.out = 90)              # 0 = straight away centre
+  wall <- 330 + 70 * cos(2 * th)
+  arc  <- 95
+  line <- list(color = COL$border, width = 2)
+  p |>
+    add_paths(x = c(-233, 0, 233), y = c(233, 0, 233), line = line,
+              hoverinfo = "skip", showlegend = FALSE, inherit = FALSE) |>
+    add_paths(x = wall * sin(th), y = wall * cos(th), line = line,
+              hoverinfo = "skip", showlegend = FALSE, inherit = FALSE) |>
+    add_paths(x = arc * sin(th), y = arc * cos(th), line = list(color = COL$border, width = 1),
+              hoverinfo = "skip", showlegend = FALSE, inherit = FALSE) |>
+    add_paths(x = c(0, 63.6, 0, -63.6, 0), y = c(0, 63.6, 127.3, 63.6, 0),
+              line = list(color = COL$text2, width = 1.5),
+              hoverinfo = "skip", showlegend = FALSE, inherit = FALSE)
+}
+
+PARKS <- sort(park_bbe$park)
+
+# Parks whose outline may not match where the team played in 2026. Verify
+# against the 2026 schedule and edit this list.
+PARK_CAVEAT <- c(
+  ATH = "The A's have been playing in a temporary home, so this outline may not match the 2026 park.",
+  TB  = "The Rays were displaced from Tropicana Field after hurricane damage, so this outline may not match the 2026 park."
+)
+# (No Rangers caveat: the outline data uses the 2022 "guardians" name and was
+#  rebuilt in 2023, after Texas moved to its new park in 2020.)
+
+# A real park's walls, foul lines and infield, or the generic field if we
+# have no outline for it.
+park_traces <- function(p, park_code) {
+  d <- stadiums[stadiums$park == park_code, ]
+  if (nrow(d) == 0) return(field_traces(p))
+  xy <- spray_xy(d$x, d$y); d$px <- xy$x; d$py <- xy$y
+  for (sg in split(d, factor(d$segment, levels = unique(d$segment)))) {
+    sg   <- sg[order(sg$order), ]
+    wall <- sg$segment[1] == "outfield_outer"
+    p <- p |> add_paths(
+      x = sg$px, y = sg$py, hoverinfo = "skip", showlegend = FALSE, inherit = FALSE,
+      line = list(color = if (wall) COL$text2 else COL$border, width = if (wall) 2.5 else 1.5)
+    )
+  }
+  p
 }
 
 # ---- Headline helpers -----------------------------------------------------------
@@ -529,8 +590,59 @@ ui <- page_navbar(
     )
   ),
   
-  nav_panel("Robbed",
-            coming_soon("Coming next", "The unluckiest hard-hit balls of 2026."))
+  nav_panel(
+    "Robbed", value = "robbed",
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 290,
+        selectInput("rob_team", "Highlight team", ROB_TEAMS,
+                    selected = if ("TOR" %in% ROB_TEAMS) "TOR" else ROB_TEAMS[1]),
+        selectInput("rob_park", "Ballpark", c("All parks (generic field)" = "ALL", PARKS)),
+        sliderInput("rob_xba", "Robbed = an out with xBA of at least",
+                    min = 0.5, max = 0.95, value = 0.7, step = 0.05),
+        hr(),
+        p(class = "small text-secondary",
+          strong("xBA"), " is Statcast's expected batting average for a ball hit at",
+          " that exit velocity and launch angle: how often it falls for a hit",
+          " league-wide. An out at .700 xBA is a hit 7 times in 10.")
+      ),
+      uiOutput("rob_tiles"),
+      layout_columns(
+        col_widths = c(6, 6),
+        card(
+          card_header("Where the hits went to die"),
+          plotlyOutput("rob_spray", height = "520px", fill = FALSE),
+          uiOutput("rob_spray_note")
+        ),
+        card(
+          card_header("Most robbed balls of 2026"),
+          # The spray chart sets this row's height. The table fills it and
+          # scrolls; the absolute-positioned inner div adds no height of its own,
+          # so a long table can't stretch the row (and leave the chart with a gap).
+          card_body(
+            padding = 0,
+            div(style = "position:relative; flex:1 1 auto; min-height:520px;",
+                div(style = "position:absolute; inset:0; overflow:auto; padding:1rem 1.25rem;",
+                    uiOutput("rob_table")))
+          )
+        )
+      ),
+      layout_columns(
+        col_widths = c(6, 6),
+        card(
+          card_header("Unluckiest hitters: hits below expected"),
+          plotlyOutput("rob_luck", height = "620px"),
+          uiOutput("rob_luck_note")
+        ),
+        card(
+          card_header("Where hits go to die: robbed outs per 1,000 balls in play"),
+          plotlyOutput("rob_parks", height = "620px"),
+          p(class = "small text-secondary mb-0",
+            "A rate, so busy and quiet parks compare fairly. Click a bar to see that park.")
+        )
+      )
+    )
+  )
 )
 
 # ---- Server -----------------------------------------------------------------
@@ -889,6 +1001,188 @@ server <- function(input, output, session) {
                                            if (tap) " (still the right call: good decisions can lose)"
                                            else " (still right to hold: too risky to know)"))
     )
+  })
+  
+  # -- Robbed -----------------------------------------------------------------
+  rob <- reactive({
+    r <- filter(robbed, xba >= input$rob_xba)
+    if (input$rob_park != "ALL") r <- filter(r, park == input$rob_park)
+    r
+  })
+  
+  # Click a park's bar -> show that park
+  observeEvent(suppressWarnings(event_data("plotly_click", source = "parks")), {
+    ev <- suppressWarnings(event_data("plotly_click", source = "parks"))
+    k  <- as.character(ev$y)
+    if (length(k) == 1 && k %in% PARKS) updateSelectInput(session, "rob_park", selected = k)
+  })
+  
+  output$rob_tiles <- renderUI({
+    r    <- rob()
+    hard <- slice_max(r, ev, n = 1, with_ties = FALSE)
+    worst <- slice_min(luck, luck, n = 1, with_ties = FALSE)
+    team_n <- sum(r$team == input$rob_team)
+    where  <- if (input$rob_park == "ALL") "" else sprintf(" at %s's park", input$rob_park)
+    layout_columns(
+      col_widths = c(3, 3, 3, 3),
+      stat_tile(comma(nrow(r)), paste0("robbed outs", where),
+                sprintf("xBA %.2f or higher", input$rob_xba), COL$lost),
+      stat_tile(comma(team_n), sprintf("%s hitters robbed%s", input$rob_team, where),
+                if (input$rob_park == "ALL")
+                  sprintf("%.1f%% of all robbed outs (avg team: %.1f%%)",
+                          100 * team_n / max(nrow(r), 1), 100 / length(ROB_TEAMS))
+                else
+                  sprintf("%.1f%% of the robbed outs at this park", 100 * team_n / max(nrow(r), 1)),
+                COL$won),
+      if (nrow(hard) == 1)
+        stat_tile(sprintf("%.1f", hard$ev), "mph: hardest-hit out",
+                  sprintf("%s, %s", hard$name, format(hard$game_date, "%b %d")), COL$missed)
+      else stat_tile("–", "mph: hardest-hit out", "none at this threshold", COL$missed),
+      stat_tile(sprintf("%.1f", worst$luck), "hits below expected",
+                sprintf("%s (%s): unluckiest hitter", worst$name, worst$team), COL$lost)
+    )
+  })
+  
+  output$rob_spray <- renderPlotly({
+    r  <- rob() |>
+      mutate(hl = team == input$rob_team,
+             hover = sprintf("<b>%s</b> (%s) vs %s · %s<br>%.1f mph, %d°, %s ft<br>xBA %.3f → %s",
+                             name, team, opp, format(game_date, "%b %d"),
+                             ev, as.integer(round(la)),
+                             ifelse(is.na(dist), "?", as.character(dist)), xba, result))
+    xy <- spray_xy(r$hc_x, r$hc_y); r$x <- xy$x; r$y <- xy$y
+    others <- filter(r, !hl); team_r <- filter(r, hl)
+    
+    # Real parks extend behind home plate (backstop, foul territory);
+    # the generic field doesn't, so it gets a tighter view
+    generic <- input$rob_park == "ALL"
+    xr <- if (generic) c(-310, 310) else c(-330, 330)
+    yr <- if (generic) c(-25, 450)  else c(-90, 470)
+    
+    plot_ly() |>
+      park_traces(input$rob_park) |>
+      add_markers(data = others, x = ~x, y = ~y, text = ~hover, hoverinfo = "text",
+                  name = "Other teams",
+                  marker = list(size = 6, color = COL$others, opacity = 0.7,
+                                line = list(width = 0)),
+                  hoverlabel = list(bordercolor = COL$text2)) |>
+      add_markers(data = team_r, x = ~x, y = ~y, text = ~hover, hoverinfo = "text",
+                  name = input$rob_team,
+                  marker = list(size = 9, color = COL$highlight,
+                                line = list(color = COL$card, width = 1.5)),
+                  hoverlabel = list(bordercolor = COL$highlight)) |>
+      dark_layout(
+        xaxis = list(range = xr, showgrid = FALSE, zeroline = FALSE,
+                     showticklabels = FALSE, title = "", fixedrange = TRUE,
+                     constrain = "domain"),
+        yaxis = list(range = yr, showgrid = FALSE, zeroline = FALSE,
+                     showticklabels = FALSE, title = "", fixedrange = TRUE,
+                     scaleanchor = "x", scaleratio = 1, constrain = "domain"),
+        legend = list(orientation = "h", x = 0, y = -0.02),
+        margin = list(t = 5, b = 5, l = 5, r = 5)
+      ) |>
+      config(displayModeBar = FALSE)
+  })
+  
+  output$rob_spray_note <- renderUI({
+    pk <- input$rob_park
+    has_outline <- pk != "ALL" && pk %in% stadiums$park
+    p(class = "small text-secondary mb-0",
+      if (pk == "ALL") "Every robbed ball of the season on a generic field. Pick a ballpark to see its real walls."
+      else if (has_outline) sprintf("Robbed balls hit at %s's park, on its real outline.", pk)
+      else sprintf("No outline for %s's park, so it's shown on a generic field.", pk),
+      if (pk %in% names(PARK_CAVEAT)) span(" ", PARK_CAVEAT[[pk]]),
+      " Outlines: GeomMLBStadiums (Ben Dilday). Distances approximate.")
+  })
+  
+  output$rob_parks <- renderPlotly({
+    counts <- robbed |> filter(xba >= input$rob_xba) |> count(park, name = "robbed")
+    d <- park_bbe |>
+      left_join(counts, by = "park") |>
+      mutate(robbed = coalesce(robbed, 0L), rate = 1000 * robbed / bbe,
+             hl = park == input$rob_park,
+             hover = sprintf("<b>%s</b> home park<br>%s robbed of %s balls in play<br>%.1f per 1,000",
+                             park, comma(robbed), comma(bbe), rate)) |>
+      arrange(rate)
+    d$park <- factor(d$park, levels = d$park)
+    
+    bar_col <- ifelse(d$hl, COL$highlight, COL$others)
+    plot_ly(d, x = ~rate, y = ~park, type = "bar", orientation = "h", source = "parks",
+            text = ~hover, hoverinfo = "text", textposition = "none",
+            marker = list(color = bar_col),
+            hoverlabel = list(bordercolor = bar_col)) |>   # tooltip border = bar colour
+      dark_layout(
+        xaxis = list(title = "Robbed outs per 1,000 balls in play", gridcolor = COL$grid,
+                     zeroline = FALSE),
+        yaxis = list(title = "", tickfont = list(color = COL$text1, size = 11)),
+        showlegend = FALSE, margin = list(t = 10, l = 10)
+      ) |>
+      config(displayModeBar = FALSE) |>
+      event_register("plotly_click")
+  })
+  
+  output$rob_table <- renderUI({
+    top <- rob() |> arrange(desc(xba), desc(ev)) |> head(25)
+    rows <- lapply(seq_len(nrow(top)), \(i) {
+      t  <- top[i, ]
+      hl <- t$team == input$rob_team
+      tags$tr(
+        style = if (hl) sprintf("box-shadow: inset 3px 0 0 %s;", COL$highlight) else NULL,
+        tags$td(style = "white-space:nowrap;", format(t$game_date, "%b %d")),
+        tags$td(strong(t$name), span(class = "text-secondary", sprintf(" %s", t$team))),
+        tags$td(class = "text-end", sprintf("%.1f", t$ev)),
+        tags$td(class = "text-end", sprintf("%d°", as.integer(round(t$la)))),
+        tags$td(class = "text-end", ifelse(is.na(t$dist), "?", t$dist)),
+        tags$td(class = "text-end", strong(sprintf(".%03d", round(1000 * t$xba)))),
+        tags$td(class = "text-secondary", t$result)
+      )
+    })
+    tags$table(
+      class = "table table-sm mb-0 rob-table",
+      style = sprintf("--bs-table-bg: transparent; color:%s; white-space:nowrap;", COL$text1),
+      tags$thead(tags$tr(tags$th("Date"), tags$th("Batter"),
+                         tags$th(class = "text-end", title = "Exit velocity (mph)", "EV"),
+                         tags$th(class = "text-end", title = "Launch angle", "LA"),
+                         tags$th(class = "text-end", title = "Distance (ft)", "Dist"),
+                         tags$th(class = "text-end", "xBA"),
+                         tags$th("Result"))),
+      tags$tbody(rows)
+    ) |> tagList(
+      div(class = "text-secondary small mt-2",
+          "EV = exit velocity (mph) · LA = launch angle · Dist in feet")
+    )
+  })
+  
+  output$rob_luck <- renderPlotly({
+    worst <- luck |>
+      slice_min(luck, n = 12, with_ties = FALSE) |>
+      mutate(hl = team == input$rob_team,
+             label = sprintf("%s (%s)", name, team),
+             hover = sprintf("<b>%s</b> (%s)<br>%d batted balls<br>%d hits vs %.1f expected<br>Avg on contact .%03d vs xBA .%03d",
+                             name, team, bbe, hits, x_hits,
+                             round(1000 * bacon), round(1000 * xbacon)))
+    worst$label <- factor(worst$label, levels = rev(worst$label))
+    
+    bar_col <- ifelse(worst$hl, COL$highlight, COL$lost)
+    plot_ly(worst, y = ~label, x = ~luck, type = "bar", orientation = "h",
+            text = ~hover, hoverinfo = "text", textposition = "none",
+            marker = list(color = bar_col),
+            hoverlabel = list(bordercolor = bar_col)) |>   # tooltip border = bar colour
+      dark_layout(
+        xaxis = list(title = "Hits minus expected hits (season)", zeroline = TRUE,
+                     zerolinecolor = COL$text2, gridcolor = COL$grid),
+        yaxis = list(title = "", tickfont = list(color = COL$text1)),
+        showlegend = FALSE, margin = list(t = 10, l = 10)
+      ) |>
+      config(displayModeBar = FALSE)
+  })
+  
+  output$rob_luck_note <- renderUI({
+    t <- luck |> filter(team == input$rob_team) |> slice_min(luck, n = 1, with_ties = FALSE)
+    p(class = "small text-secondary mb-0",
+      "Hitters with 200+ batted balls. Expected hits = the sum of xBA over every ball in play.",
+      if (nrow(t) == 1) sprintf(" Unluckiest %s hitter: %s, %.1f hits below expected.",
+                                input$rob_team, t$name, t$luck))
   })
   
   # -- Who Sees the Zone -------------------------------------------------------
