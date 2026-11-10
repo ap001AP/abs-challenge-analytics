@@ -622,7 +622,7 @@ ui <- page_navbar(
           card_body(
             padding = 0,
             div(style = "position:relative; flex:1 1 auto; min-height:520px;",
-                div(style = "position:absolute; inset:0; overflow:auto; padding:1rem 1.25rem;",
+                div(style = "position:absolute; inset:0; overflow:auto; padding:1rem 1.25rem; color-scheme:dark;",
                     uiOutput("rob_table")))
           )
         )

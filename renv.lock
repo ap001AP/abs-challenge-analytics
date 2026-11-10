@@ -9,6 +9,34 @@
     ]
   },
   "Packages": {
+    "GeomMLBStadiums": {
+      "Package": "GeomMLBStadiums",
+      "Version": "0.0.0.9000",
+      "Source": "GitHub",
+      "Title": "GeomMLBStadiums: Draw Major League Baseball Stadiums with ggplot2",
+      "Authors@R": "person(\"Ben\", \"Dilday\", email = \"ben.dilday.phd@gmail.com.com\", role = c(\"aut\", \"cre\"))",
+      "Description": "Draw Major Leagure Stadiums in the ggplot2 framework",
+      "Depends": [
+        "R (>= 3.5.0)"
+      ],
+      "License": "MIT + file LICENSE",
+      "Encoding": "UTF-8",
+      "LazyData": "true",
+      "Imports": [
+        "ggplot2",
+        "grid"
+      ],
+      "RoxygenNote": "6.0.1",
+      "RemoteType": "github",
+      "RemoteHost": "api.github.com",
+      "RemoteRepo": "GeomMLBStadiums",
+      "RemoteUsername": "bdilday",
+      "RemoteRef": "HEAD",
+      "RemoteSha": "90b4356e0694aa8fc2452e9cd61aa8173f9785d0",
+      "NeedsCompilation": "no",
+      "Author": "Ben Dilday [aut, cre]",
+      "Maintainer": "Ben Dilday <ben.dilday.phd@gmail.com.com>"
+    },
     "R6": {
       "Package": "R6",
       "Version": "2.6.1",
