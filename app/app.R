@@ -897,9 +897,18 @@ server <- function(input, output, session) {
     lim  <- max(CHALLENGE_VALUE_RUNS, st$v)
     br   <- (2.9 / 2) / 12                                       # ball radius (ft)
     
+    # Tooltip border = the heatmap's colour at that cell. Same pink -> teal ramp,
+    # but the midpoint is the light text colour instead of the card colour, so the
+    # border stays visible on near-zero (toss-up) cells.
+    ramp   <- colorRamp(c(COL$lost, COL$text2, COL$won))
+    t01    <- (pmin(pmax(r$ev, -lim), lim) + lim) / (2 * lim)
+    border <- matrix(rgb(ramp(t01), maxColorValue = 255),
+                     nrow = length(TAP_ZS), byrow = TRUE)
+    
     plot_ly(source = "tap") |>
       add_heatmap(
         x = TAP_XS, y = TAP_ZS, z = ev_m, text = hov, hoverinfo = "text",
+        hoverlabel = list(bordercolor = border),   # 2-D, one colour per cell
         zmin = -lim, zmax = lim, zmid = 0,
         # Diverging: pink (costs runs) -> neutral -> teal (gains runs)
         colorscale = list(c(0, COL$lost), c(0.5, COL$card), c(1, COL$won)),
