@@ -8,8 +8,6 @@
 
 ---
 
-## The 30-second version
-
 In 2026, Major League Baseball let players **challenge the umpire's ball-and-strike calls**. If a player thinks the ump got it wrong, he taps his helmet or cap, and a camera system that tracks every pitch replays the call within seconds. If the player was right, the call flips. If he was wrong, his team loses one of its limited challenges.
 
 That makes every close pitch a split-second bet: **is this call wrong enough, and important enough, to risk a challenge?**
