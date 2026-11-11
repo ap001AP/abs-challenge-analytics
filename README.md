@@ -52,7 +52,7 @@ This project graded every one of those bets for the whole season, including the 
 
 ---
 
-## How it works (plain English)
+## How it works
 
 Every challenge decision comes down to three things:
 
