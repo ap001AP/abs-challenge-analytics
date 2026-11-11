@@ -43,6 +43,7 @@ This project graded every one of those bets for the whole season, including the 
 | **Calculator** | Set up any situation (count, outs, runners) and see exactly how close a pitch has to be before tapping is worth it. |
 | **Robbed** | A bonus: hard-hit balls that *should* have been hits but were caught, drawn on the **real outline of every MLB ballpark**. |
 
+![Who Sees the Zone](docs/img/zone.png)
 ![Quadrant tab](docs/img/quadrant.png)
 ![Calculator tab](docs/img/calculator.png)
 ![Robbed tab: spray chart on a real ballpark](docs/img/robbed_1.png)
