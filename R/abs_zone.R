@@ -30,7 +30,6 @@ zone_signed_distance <- function(plate_x, plate_z, sz_top, sz_bot) {
 # Distance from the ball's EDGE to the zone (inches).
 #   <= 0 : ball touches the zone -> strike
 #   >  0 : ball misses the zone by that many inches -> ball
-# This is the "how close was it?" feature for the challenge model.
 edge_distance_in <- function(plate_x, plate_z, sz_top, sz_bot) {
   (zone_signed_distance(plate_x, plate_z, sz_top, sz_bot) - BALL_RADIUS_FT) * 12
 }

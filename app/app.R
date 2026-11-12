@@ -26,7 +26,6 @@ REPO_URL <- "https://github.com/ap001AP/abs-challenge-analytics"
 RUNS_PER_WIN <- 10      # standard sabermetric rule of thumb
 N_TEAMS <- 30
 
-# Headline numbers, all derived from the data
 HL <- local({
   tot <- grades |>
     summarise(winnable = sum(winnable), wins = sum(wins),
@@ -45,14 +44,6 @@ HL <- local({
     cap_bat    = by_role$captured[by_role$role == "batter"]
   )
 })
-
-# ---- Design tokens: "neon scoreboard" dark theme ----------------------------
-# Data colours (teal / pink / purple) were run through a colour-blind
-# validator against the dark surface: all pairs pass, including
-# deuteranopia (teal vs pink is the classic trap, so pink is kept darker than
-# teal to separate them by lightness). Every series also has its own marker
-# shape and a legend, so colour is never the only cue.
-# Brighter "neon" tints are used only for decoration (title, glows), never data.
 
 COL <- list(
   surface   = "#0d0b1e",   # page
@@ -132,7 +123,6 @@ AGG_TICKS  <- c(-2, -1, 0, 1, 2)                   # log2(aggression)
 AGG_LABELS <- c("¼×", "½×", "1× league", "2×", "4×")
 CALL_WORD  <- c(S = "STRIKE", B = "BALL")
 
-# ---- Helpers ----------------------------------------------------------------
 
 # "Vladimir Guerrero Jr." -> "Guerrero", not "Jr."
 last_name <- function(x) {
@@ -204,8 +194,6 @@ call_badge <- function(label, call, emphasis = FALSE) {
 }
 
 # ---- Who Sees the Zone helpers ------------------------------------------------
-# Three groups, three validated slots (teal / purple / pink), each also with
-# its own marker shape in the chart and its name on every card.
 GROUP_STYLE <- list(
   "Catchers, catching" = list(col = COL$won,    symbol = "circle",  short = "Catchers behind the plate"),
   "Catchers, batting"  = list(col = COL$missed, symbol = "diamond", short = "The same catchers at the plate"),

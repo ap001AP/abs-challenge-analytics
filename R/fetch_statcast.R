@@ -1,10 +1,6 @@
 # R/fetch_statcast.R
 # Pull every 2026 regular-season pitch from Baseball Savant, one day at a time,
 # and cache to parquet.
-#
-# Why one day at a time: Savant caps a single CSV query at ~25k rows.
-# A full MLB day is ~4,000-4,700 pitches, so one day per request stays well under
-# the cap. A week (~30k) would get silently truncated.
 
 library(baseballr)
 library(dplyr)
@@ -38,8 +34,6 @@ NUM_COLS <- c(
   "estimated_ba_using_speedangle"
 )
 
-# Force consistent types. A day where e.g. on_3b is all NA comes back as
-# logical, and that would clash with numeric days when we stack them.
 normalise_types <- function(df) {
   df |>
     select(any_of(c(CHR_COLS, NUM_COLS))) |>

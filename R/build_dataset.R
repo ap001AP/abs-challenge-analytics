@@ -6,8 +6,6 @@
 #   - challenges remaining for each team before the pitch
 #   - challenge opportunity flags (could this side have challenged?)
 #   - overturn value in runs, and the breakeven confidence needed to challenge
-#
-# Output: data/takes_2026.parquet
 
 library(dplyr)
 library(tidyr)
@@ -58,7 +56,7 @@ build_dataset <- function() {
   summ <- read_parquet(SUMM_FILE) |>
     select(game_pk, home_team_id, away_team_id)
   
-  # 1. Every pitch, with challenges attached and challenge state tracked.
+  # Every pitch, with challenges attached and challenge state tracked.
   #    (All pitches, not just takes, so innings/order are complete.)
   pitches <- season |>
     stable_zone() |>
@@ -91,7 +89,7 @@ build_dataset <- function() {
   write_parquet(re288, RE_FILE)
   write_parquet(ov_table, OV_FILE)
   
-  # 2. Takes only, with calls, geometry and opportunity flags.
+  # Takes only, with calls, geometry and opportunity flags.
   takes <- pitches |>
     filter(description %in% names(TAKE_CODES)) |>
     mutate(

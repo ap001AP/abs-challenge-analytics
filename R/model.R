@@ -45,7 +45,7 @@ MIN_OPPS <- 100L   # opportunities needed to be graded
 MIN_CHAL <- 15L    # challenges needed to be graded (8 let 9-challenge
 # batters top the leaderboard on luck)
 
-# ---- 1. Opportunities -------------------------------------------------------
+# ---- Opportunities -------------------------------------------------------
 # One row per called pitch where the side it hurt had a challenge left.
 # Batting-side decisions belong to the batter, fielding-side to the catcher
 # (pitchers made <2% of challenges; their few calls are credited to the catcher).
@@ -69,7 +69,7 @@ prep_opportunities <- function(takes) {
     )
 }
 
-# ---- 2. Read-noise model (one per role) -------------------------------------
+# ---- Read-noise model (one per role) -------------------------------------
 
 fit_read_model <- function(opps_role) {
   fit <- glm(challenged_here ~ win_dist_in + z_breakeven,
@@ -109,7 +109,7 @@ score_opportunities <- function(opps) {
   )
 }
 
-# ---- 3. Player names (MLB Stats API, cached) --------------------------------
+# ---- Player names (MLB Stats API, cached) --------------------------------
 
 lookup_names <- function(ids) {
   ids <- unique(as.integer(ids[!is.na(ids)]))
@@ -133,7 +133,7 @@ lookup_names <- function(ids) {
   cached
 }
 
-# ---- 4. Player grades -------------------------------------------------------
+# ---- Player grades -------------------------------------------------------
 
 mode_chr <- function(v) names(which.max(table(v)))
 

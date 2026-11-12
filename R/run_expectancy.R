@@ -2,10 +2,6 @@
 # Our own run-expectancy table (RE288: 12 counts x 8 base states x 3 outs),
 # built from the 2026 season, and the run value of flipping a ball/strike call.
 #
-# Why not Statcast's delta_run_exp: at the end of a plate appearance it is
-# nearly context-free (a 3-2 walk is +0.34 and a strikeout -0.33 whatever the
-# runners), so a bases-loaded full count was valued like a bases-empty one.
-#
 # Runs to the end of the half-inning, without a post-pitch score column:
 # at the FIRST pitch of the next half-inning the teams have swapped, so that
 # pitch's fld_score is the score the batting team finished its half-inning with.
@@ -141,7 +137,7 @@ monotone_count_surface <- function(M, W, iters = 500, tol = 1e-10) {
 #   after a strike: next count, or a STRIKEOUT (one more out; 0 if it's the 3rd)
 # A new plate appearance starts at 0-0, so walks/strikeouts land on 0-0 cells.
 # With monotone = TRUE every value is >= 0 by construction.
-FIXED_WEIGHT <- 1e6      # walk/strikeout edges: from 0-0 cells, thousands of pitches
+FIXED_WEIGHT <- 1e6      
 
 overturn_values_from_re <- function(re288, monotone = TRUE, k = RE_SHRINK_K) {
   key <- paste(re288$balls, re288$strikes, re288$outs_when_up, re288$bases)
